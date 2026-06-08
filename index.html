@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mapa de Regulação - Ceará</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    :root { --green:#006b3f; --muted:#667085; --warn:#b54708; --bad:#b42318; --ok:#067647; --line:#e5e7eb; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111827; }
+    header { padding:10px 14px; border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:center; flex-wrap:wrap; position:relative; z-index:1000; }
+    header h1 { font-size:18px; margin:0; color:var(--green); }
+    #app { display:grid; grid-template-columns: 1fr 420px; height: calc(100vh - 56px); }
+    #map { height:100%; width:100%; }
+    aside { border-left:1px solid var(--line); overflow:auto; padding:14px; background:#fff; }
+    input, select, button { font:inherit; }
+    .search-wrap { flex:1; min-width:240px; position:relative; }
+    .search { width:100%; padding:8px 10px; border:1px solid #d0d5dd; border-radius:8px; }
+    .suggestions { display:none; position:absolute; top:42px; left:0; right:0; max-height:360px; overflow:auto; background:#fff; border:1px solid #d0d5dd; border-radius:10px; box-shadow:0 10px 25px rgba(16,24,40,.18); z-index:2000; }
+    .suggestion { padding:9px 10px; cursor:pointer; border-bottom:1px solid #f2f4f7; }
+    .suggestion:hover, .suggestion.active { background:#f2f4f7; }
+    .suggestion-title { font-weight:650; }
+    .suggestion-meta { font-size:12px; color:var(--muted); margin-top:2px; }
+    .tiny { font-size:12px; color:var(--muted); }
+    .card { border:1px solid var(--line); border-radius:12px; padding:12px; margin:10px 0; background:#fff; }
+    .card h3 { margin:0 0 8px; font-size:16px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; margin:2px; background:#eef4ff; }
+    .svc { cursor:pointer; display:flex; justify-content:space-between; gap:8px; border-top:1px solid #f2f4f7; padding:8px 0; }
+    .svc:hover { background:#f9fafb; }
+    .status-ok { color:var(--ok); font-weight:600; }
+    .status-parcial { color:var(--warn); font-weight:600; }
+    .status-nao { color:var(--bad); font-weight:600; }
+    .obs { display:none; margin-top:6px; padding:8px; border-left:3px solid var(--warn); background:#fffaeb; border-radius:6px; }
+    .hospital { cursor:pointer; }
+    .hospital:hover { border-color:#98a2b3; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+    .toolbar label { border:1px solid #d0d5dd; border-radius:8px; padding:6px 8px; cursor:pointer; background:#fff; }
+    .toolbar input[type=file] { display:none; }
+    button { border:1px solid #d0d5dd; border-radius:8px; padding:7px 10px; background:#fff; cursor:pointer; }
+    button:hover { background:#f9fafb; }
+    @media (max-width: 900px) { #app { grid-template-columns:1fr; height:auto; } #map{height:58vh;} aside{border-left:0;border-top:1px solid var(--line);} }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Mapa de Regulação - Ceará</h1>
+  <div class="search-wrap">
+    <input id="q" class="search" placeholder="Buscar município ou hospital..." autocomplete="off" />
+    <div id="suggestions" class="suggestions"></div>
+  </div>
+  <span class="tiny">Protótipo local</span>
+</header>
+
+<div id="app">
+  <div id="map"></div>
+  <aside>
+    <div class="toolbar">
+      <label>Atualizar municípios CSV<input type="file" id="municipiosFile" accept=".csv"></label>
+      <label>Atualizar hospitais CSV<input type="file" id="hospitaisFile" accept=".csv"></label>
+      <label>Atualizar serviços CSV<input type="file" id="servicosFile" accept=".csv"></label>
+      <button id="reset">Recarregar dados</button>
+    </div>
+    <div id="panel">
+      <h2>Clique em um município</h2>
+      <p class="tiny">O painel mostrará ADS, polo, hospital do polo, hospitais de referência e serviços. Dados de exemplo: edite os CSVs em <code>/data</code> ou importe novos arquivos pelos botões acima.</p>
+    </div>
+  </aside>
+</div>
+
+<script>
+const GEOJSON_URL = "https://raw.githubusercontent.com/tbrugz/geodata-br/master/geojson/geojs-23-mun.json";
+
+// Para usar Google Sheets publicado como CSV, substitua estes campos pelas URLs.
+// Se deixar vazio, usa os CSVs locais da pasta /data.
+const SHEETS = {
+  municipios: "",
+  hospitais: "",
+  servicos: ""
+};
+
+let state = { municipios: [], hospitais: [], servicos: [], geoLayer: null, selected: null };
+
+function norm(s){
+  return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim().toUpperCase();
+}
+
+async function fetchCsv(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error("Falha ao carregar " + url);
+  const text = await res.text();
+  return Papa.parse(text, {header:true, skipEmptyLines:true}).data;
+}
+
+async function loadData(){
+  state.municipios = await fetchCsv(SHEETS.municipios || "data/municipios.csv");
+  state.hospitais = await fetchCsv(SHEETS.hospitais || "data/hospitais.csv");
+  state.servicos = await fetchCsv(SHEETS.servicos || "data/servicos.csv");
+}
+
+function parseFile(file, target){
+  return new Promise((resolve) => {
+    Papa.parse(file, {header:true, skipEmptyLines:true, complete: r => {
+      state[target] = r.data;
+      if(state.selected) showMunicipio(state.selected);
+      resolve();
+    }});
+  });
+}
+
+const map = L.map('map', { zoomControl: true }).setView([-5.2, -39.5], 7);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+function colorForADS(ads){
+  const colors = {
+    "FORTALEZA":"#90d4a6","CAUCAIA":"#9bd4c0","MARACANAÚ":"#b7d8ab","BATURITÉ":"#dcc777","ITAPIPOCA":"#b8d67f","CASCAVEL":"#ef9a9a",
+    "QUIXADÁ":"#9ebd8e","CANINDÉ":"#b0d5c2","TAUÁ":"#e8c2e5",
+    "LIMOEIRO DO NORTE":"#e6c0d6","ARACATI":"#f3d0dc","RUSSAS":"#f2e384",
+    "SOBRAL":"#a9b56a","ACARAÚ":"#d6d2a0","TIANGUÁ":"#b2ce9a","CRATEÚS":"#d8bde6","CAMOCIM":"#99d2ad",
+    "JUAZEIRO DO NORTE":"#e7bd9f","ICÓ":"#b8db8c","IGUATU":"#b7d8a0","BREJO SANTO":"#e0d28a","CRATO":"#e9d18d"
+  };
+  return colors[norm(ads)] || "#d0d5dd";
+}
+
+function featureName(feature){
+  return feature.properties.name || feature.properties.nome || feature.properties.NM_MUN || feature.properties.description;
+}
+
+function styleFeature(feature){
+  const name = featureName(feature);
+  const m = state.municipios.find(x => norm(x.municipio) === norm(name));
+  return { color:"#344054", weight:0.8, fillColor: colorForADS(m?.ads), fillOpacity:0.72 };
+}
+
+function onEachFeature(feature, layer){
+  const name = featureName(feature);
+  layer.bindTooltip(name, {sticky:true});
+  layer.on({
+    click: () => showMunicipio(name, layer),
+    mouseover: e => e.target.setStyle({weight:2, fillOpacity:0.92}),
+    mouseout: e => state.geoLayer.resetStyle(e.target)
+  });
+}
+
+async function loadMap(){
+  const geo = await fetch(GEOJSON_URL).then(r=>r.json());
+  state.geoLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(map);
+  map.fitBounds(state.geoLayer.getBounds());
+}
+
+function hospitalServices(hospital){
+  return state.servicos.filter(s => norm(s.hospital) === norm(hospital));
+}
+
+function renderHospital(h){
+  const servs = hospitalServices(h.hospital);
+  const servicesHtml = servs.length ? servs.map(s => {
+    const status = norm(s.disponivel || "sim");
+    const cls = status.includes("NAO") ? "status-nao" : status.includes("PARCIAL") ? "status-parcial" : "status-ok";
+    const flag = s.observacao ? "⚠️" : "";
+    return `<div class="svc" onclick="toggleObs(this)">
+      <span>${s.servico} ${flag}</span><span class="${cls}">${s.disponivel || "sim"}</span>
+      <div class="obs"><b>Observação:</b> ${s.observacao || "Sem observação."}<br><span class="tiny">Atualizado em: ${s.atualizado_em || "-"}</span></div>
+    </div>`;
+  }).join("") : `<p class="tiny">Nenhum serviço cadastrado para este hospital.</p>`;
+  return `<div class="card hospital">
+    <h3>${h.hospital}</h3>
+    <div class="tiny">${h.municipio || ""} · ${h.tipo || ""}</div>
+    <div>${servicesHtml}</div>
+  </div>`;
+}
+
+window.toggleObs = function(el){
+  const obs = el.querySelector(".obs");
+  if(obs) obs.style.display = obs.style.display === "block" ? "none" : "block";
+};
+
+function showMunicipio(nome, layer){
+  state.selected = nome;
+  const m = state.municipios.find(x => norm(x.municipio) === norm(nome));
+  const panel = document.getElementById("panel");
+  if(!m){
+    panel.innerHTML = `<h2>${nome}</h2><p class="tiny">Município sem cadastro na planilha de municípios.</p>`;
+    return;
+  }
+  const hs = state.hospitais.filter(h => norm(h.municipio_atendido || h.municipio) === norm(nome) || norm(h.polo) === norm(m.polo) || norm(h.ads) === norm(m.ads));
+  panel.innerHTML = `
+    <h2>${m.municipio}</h2>
+    <div class="card">
+      <div><b>Região de Saúde:</b> ${m.regiao_saude || "-"}</div>
+      <div><b>ADS:</b> ${m.ads || "-"}</div>
+      <div><b>Polo:</b> ${m.polo || "-"}</div>
+      <div><b>Hospital do polo:</b> ${m.hospital_polo || "-"}</div>
+      <div class="tiny">Última atualização: ${m.atualizado_em || "-"}</div>
+    </div>
+    <h3>Hospitais relacionados</h3>
+    ${hs.length ? hs.map(renderHospital).join("") : `<p class="tiny">Nenhum hospital relacionado cadastrado.</p>`}
+  `;
+  if(layer) map.fitBounds(layer.getBounds(), {maxZoom:10});
+}
+
+function scoreMatch(text, query){
+  const t = norm(text);
+  const q = norm(query);
+  if(!q) return 0;
+  if(t === q) return 100;
+  if(t.startsWith(q)) return 90;
+  if(t.includes(q)) return 75 - Math.min(20, t.indexOf(q));
+  // busca aproximada simples por tokens: ajuda quando há erro de digitação ou ordem diferente
+  const parts = q.split(/\s+/).filter(Boolean);
+  const hits = parts.filter(p => t.includes(p)).length;
+  if(hits) return 40 + hits * 10;
+  return 0;
+}
+
+function buildSearchItems(){
+  const municipios = state.municipios.map(m => ({
+    type:"municipio",
+    label:m.municipio,
+    meta:`Município · ADS ${m.ads || "-"} · Polo ${m.polo || "-"}`,
+    target:m.municipio
+  }));
+  const hospitais = state.hospitais.map(h => ({
+    type:"hospital",
+    label:h.hospital,
+    meta:`Hospital · ${h.municipio || h.municipio_atendido || "-"} · ${h.tipo || ""}`,
+    target:h.municipio_atendido || h.municipio,
+    hospital:h.hospital
+  }));
+  return [...municipios, ...hospitais];
+}
+
+function renderSuggestions(query){
+  const box = document.getElementById("suggestions");
+  const q = String(query || "").trim();
+  if(q.length < 2){ box.style.display = "none"; box.innerHTML = ""; return; }
+  const results = buildSearchItems()
+    .map(item => ({...item, score: Math.max(scoreMatch(item.label, q), scoreMatch(item.meta, q) - 15)}))
+    .filter(item => item.score > 0)
+    .sort((a,b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, 10);
+
+  if(!results.length){
+    box.innerHTML = `<div class="suggestion"><div class="suggestion-title">Nenhum resultado encontrado</div><div class="suggestion-meta">Tente parte do nome do município ou hospital.</div></div>`;
+    box.style.display = "block";
+    return;
+  }
+
+  box.innerHTML = results.map((item, idx) => `
+    <div class="suggestion" data-index="${idx}">
+      <div class="suggestion-title">${item.type === "hospital" ? "🏥" : "📍"} ${item.label}</div>
+      <div class="suggestion-meta">${item.meta}</div>
+    </div>
+  `).join("");
+  box.style.display = "block";
+  box.querySelectorAll(".suggestion[data-index]").forEach(el => {
+    el.addEventListener("click", () => selectSearchItem(results[Number(el.dataset.index)]));
+  });
+}
+
+function findLayerByMunicipio(nome){
+  let found = null;
+  if(!state.geoLayer) return null;
+  state.geoLayer.eachLayer(layer => {
+    const n = featureName(layer.feature);
+    if(norm(n) === norm(nome)) found = layer;
+  });
+  return found;
+}
+
+function selectSearchItem(item){
+  const q = document.getElementById("q");
+  const box = document.getElementById("suggestions");
+  q.value = item.label;
+  box.style.display = "none";
+  const layer = findLayerByMunicipio(item.target);
+  showMunicipio(item.target, layer);
+  if(item.type === "hospital"){
+    setTimeout(() => {
+      const cards = [...document.querySelectorAll(".hospital h3")];
+      const title = cards.find(x => norm(x.textContent) === norm(item.hospital));
+      if(title){ title.scrollIntoView({behavior:"smooth", block:"center"}); title.parentElement.style.borderColor = "#006b3f"; }
+    }, 50);
+  }
+}
+
+const searchInput = document.getElementById("q");
+searchInput.addEventListener("input", e => renderSuggestions(e.target.value));
+searchInput.addEventListener("keydown", e => {
+  if(e.key === "Enter"){
+    const first = document.querySelector("#suggestions .suggestion[data-index]");
+    if(first) first.click();
+  }
+  if(e.key === "Escape") document.getElementById("suggestions").style.display = "none";
+});
+document.addEventListener("click", e => {
+  if(!e.target.closest(".search-wrap")) document.getElementById("suggestions").style.display = "none";
+});
+
+document.getElementById("municipiosFile").addEventListener("change", e => parseFile(e.target.files[0], "municipios"));
+document.getElementById("hospitaisFile").addEventListener("change", e => parseFile(e.target.files[0], "hospitais"));
+document.getElementById("servicosFile").addEventListener("change", e => parseFile(e.target.files[0], "servicos"));
+document.getElementById("reset").addEventListener("click", () => location.reload());
+
+(async function init(){
+  await loadData();
+  await loadMap();
+})();
+</script>
+</body>
+</html>

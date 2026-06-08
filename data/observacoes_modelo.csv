@@ -1,0 +1,4 @@
+﻿hospital,servico,status,observacao,atualizado_em,fonte
+,,,,,Preencher manualmente para intercorrências operacionais
+Hospital Geral Dr. César Cals,Serviços assistenciais,atenção,Habilitações assistenciais transferidas para o Hospital Universitário do Ceará (HUC) conforme Resolução CIB/CE 903/2025; validar funcionamento atual antes de regular para o HGCC.,2026-06-06,Resolução CIB/CE 903/2025
+Hospital Universitário do Ceará (HUC),Obstetrícia/Neonatologia,atenção,HUC recebeu transferência de habilitações do HGCC; SESA anunciou 185 leitos obstétricos/neonatais para gestantes de alto risco e bebês. Validar porta/fluxo operacional vigente.,2026-06-06,SESA 14/11/2025; Resolução CIB/CE 903/2025
